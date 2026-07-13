@@ -1,6 +1,7 @@
 import re
 from typing import Callable
 from langchain.messages import AIMessage, HumanMessage
+from langchain_groq import ChatGroq
 
 def parse_category(response: str) -> str | None:
     """
@@ -21,7 +22,7 @@ def parse_category(response: str) -> str | None:
     return None
 
 
-# ── Fake tools (simulating real tool responses) for ReAct prompting example ───────────────
+# --- Fake tools (simulating real tool responses) for ReAct prompting example ----------------------
 # In a real system these would call actual APIs or databases
 def get_order_status(order_id: str) -> str:
     """
@@ -61,7 +62,7 @@ def get_account_balance(account_id: str) -> str:
 # template of react agent function to simulate the ReAct prompting for customer support
 # this can be used for any use case by changing the system prompt and tools
 def run_react_agent(
-    llm,
+    llm: ChatGroq,
     prompt_template: str,
     input_variables: dict,
     tools: dict[str, Callable],
@@ -151,3 +152,90 @@ def run_react_agent(
 
     return "Max steps reached without a final answer."
     
+
+# --- Self refine helper functions -------------------------------------------
+def parse_critique(critique: str) -> bool:
+    """
+    Checks if the critic said PASSED: yes
+    
+    Args:
+        critique (str): The critique text from the critic LLM.
+    Returns:
+        bool: True if the critique indicates the draft passed, False otherwise.
+    """
+
+    for line in critique.strip().split("\n"):
+        if line.strip().lower().startswith("passed:"):
+            return "yes" in line.lower()
+    return False
+
+def self_refine(complaint: str, prompt_dict, llm: ChatGroq, llm_critic: ChatGroq, llm_refiner: ChatGroq, max_iterations: int = 3) -> str:
+    """
+    Self-refine loop for generating and refining a customer support email.
+    
+    Args:
+        complaint (str): The customer complaint to address.
+        prompt_dict (dict): Dictionary containing the generator, critic, and refiner prompts.
+        llm (ChatGroq): The language model for generating and refining the email.
+        llm_critic (ChatGroq): The language model for critiquing the email.
+        llm_refiner (ChatGroq): The language model for refining the email.
+        max_iterations (int): Maximum number of refinement iterations (default is 3).
+    Returns:
+        str: The final refined email draft.
+    """
+    
+    # Generate initial draft email based on the customer complaint
+    generator_prompt_template = prompt_dict['generator']
+
+    generator_chain = generator_prompt_template | llm
+    draft = generator_chain.invoke({"complaint": complaint}).content
+
+    print("-"*50)
+    print("INITIAL DRAFT")
+    print("-"*50)
+    print(draft)
+
+    # refine loop
+    for iter in range(max_iterations):
+        print(f"\n{'=' * 50}")
+        print(f"CRITIQUE (iteration {iter + 1})")
+        print("=" * 50)
+
+        # Critique the draft
+        critic_prompt_template = prompt_dict['critic']
+
+        critic_chain = critic_prompt_template | llm_critic
+        critique = critic_chain.invoke({
+            "complaint": complaint,
+            "email_draft": draft
+        }).content
+
+        print(critique)
+
+        # Check if it passed the critique
+        if parse_critique(critique):
+            print(f"\nDraft passed the critique on iteration {iter + 1}. No further refinement needed.")
+            break
+
+        print(f"\n{'=' * 50}")
+        print(f"REFINED DRAFT (iteration {iter + 1})")
+        print("=" * 50)
+
+        # Refine the draft based on critique
+        refiner_prompt_template = prompt_dict['refiner']
+
+        refiner_chain = refiner_prompt_template | llm_refiner
+        draft = refiner_chain.invoke({
+            "complaint": complaint,
+            "email_draft": draft,
+            "critique": critique
+        }).content
+
+        print(draft)
+
+    print(f"\n{'=' * 50}")
+    print(f"FINAL DRAFT")
+    print("=" * 50)
+    print(draft)
+
+    return draft
